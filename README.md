@@ -1,1 +1,1 @@
-create a virtual environment and install detoxify in it
+make virtual environment and use requirements.txt to install requirements.txt
