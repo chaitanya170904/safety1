@@ -1,0 +1,92 @@
+import os
+import numpy as np
+from PIL import Image
+import torch
+from transformers import AutoImageProcessor, AutoModelForImageClassification
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+import logging
+
+# Set up logging
+logger = logging.getLogger(__name__)
+
+class ImageAnalyzerAPI(APIView):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Initialize models as None - we'll load them on demand
+        self.processor = None
+        self.model = None
+
+    def post(self, request):
+        try:
+            # Get the image from request
+            image_file = request.FILES.get('image')
+            if not image_file:
+                return Response(
+                    {'error': 'No image file provided'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Save the file temporarily
+            temp_path = 'temp_image.jpg'
+            with open(temp_path, 'wb+') as destination:
+                for chunk in image_file.chunks():
+                    destination.write(chunk)
+
+            # Analyze the image
+            analysis_result = self.analyze_image(temp_path)
+
+            # Clean up
+            os.remove(temp_path)
+
+            # Return the analysis result
+            return Response({'analysis_result': analysis_result}, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error processing image: {str(e)}")
+            return Response(
+                {'error': str(e)}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    def analyze_image(self, image_path):
+        try:
+            # Load models on demand to save memory
+            if self.processor is None or self.model is None:
+                # Load the Falconsai NSFW detection model
+                self.processor = AutoImageProcessor.from_pretrained("Falconsai/nsfw_image_detection")
+                self.model = AutoModelForImageClassification.from_pretrained("Falconsai/nsfw_image_detection")
+            
+            # Load and preprocess the image
+            image = Image.open(image_path)
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+            
+            # Process the image
+            inputs = self.processor(images=image, return_tensors="pt")
+            
+            # Get predictions
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                logits = outputs.logits
+                probs = torch.nn.functional.softmax(logits, dim=-1)
+            
+            # The model has two classes: 0 for safe, 1 for NSFW
+            # Get the probability of NSFW content (class 1)
+            nsfw_prob = probs[0, 1].item()
+            
+            # Get the class label
+            predicted_class = torch.argmax(probs, dim=1).item()
+            class_label = "NSFW" if predicted_class == 1 else "Safe"
+            
+            # Return analysis result
+            if nsfw_prob > 0.7:
+                return f"WARNING: This image contains NSFW content (Probability: {nsfw_prob:.2%})"
+            elif nsfw_prob > 0.3:
+                return f"CAUTION: This image might contain sensitive content (Probability: {nsfw_prob:.2%})"
+            else:
+                return f"This image appears to be safe for social media (Probability: {nsfw_prob:.2%})"
+        except Exception as e:
+            logger.error(f"Error in analyze_image: {str(e)}")
+            return f"Error analyzing image: {str(e)}"
